@@ -15,6 +15,7 @@ export class GdmLiveAudio extends LitElement {
   @state() isRecording = false;
   @state() status = '';
   @state() error = '';
+  @state() outputTranscription = '';
 
   private client: GoogleGenAI;
   private session: Session;
@@ -38,6 +39,22 @@ export class GdmLiveAudio extends LitElement {
       right: 0;
       z-index: 10;
       text-align: center;
+    }
+
+    #transcription {
+      position: absolute;
+      top: 5vh;
+      left: 5vw;
+      right: 5vw;
+      z-index: 10;
+      background: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 20px;
+      border-radius: 10px;
+      max-height: 30vh;
+      overflow-y: auto;
+      font-family: Arial, sans-serif;
+      line-height: 1.5;
     }
 
     .controls {
@@ -135,6 +152,21 @@ export class GdmLiveAudio extends LitElement {
               this.sources.add(source);
             }
 
+            // Handle output transcription
+            if (message.serverContent?.outputTranscription?.text) {
+              this.outputTranscription += message.serverContent.outputTranscription.text;
+              this.requestUpdate();
+            }
+
+            // Clear transcription when turn is complete
+            if (message.serverContent?.turnComplete) {
+              // Keep the transcription visible for a moment, then clear it
+              setTimeout(() => {
+                this.outputTranscription = '';
+                this.requestUpdate();
+              }, 2000);
+            }
+
             const interrupted = message.serverContent?.interrupted;
             if(interrupted) {
               for(const source of this.sources.values()) {
@@ -142,6 +174,9 @@ export class GdmLiveAudio extends LitElement {
                 this.sources.delete(source);
               }
               this.nextStartTime = 0;
+              // Clear transcription on interruption
+              this.outputTranscription = '';
+              this.requestUpdate();
             }
           },
           onerror: (e: ErrorEvent) => {
@@ -153,6 +188,7 @@ export class GdmLiveAudio extends LitElement {
         },
         config: {
           responseModalities: [Modality.AUDIO],
+          outputAudioTranscription: {},
           speechConfig: {
             voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Orus'}},
             // languageCode: 'en-GB'
@@ -270,6 +306,7 @@ Remember: You are here to inform and support, not to replace professional medica
 
   private reset() {
     this.session?.close();
+    this.outputTranscription = '';
     this.initSession();
     this.updateStatus('Session cleared.');
   }
@@ -277,6 +314,13 @@ Remember: You are here to inform and support, not to replace professional medica
   render() {
     return html`
       <div>
+        ${this.outputTranscription ? html`
+          <div id="transcription">
+            <strong>AI Assistant:</strong><br>
+            ${this.outputTranscription}
+          </div>
+        ` : ''}
+
         <div class="controls">
           <button
             id="resetButton"
