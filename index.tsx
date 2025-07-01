@@ -8,6 +8,7 @@ import {GoogleGenAI, LiveServerMessage, Modality, Session} from '@google/genai';
 import {LitElement, css, html} from 'lit';
 import {customElement, state} from 'lit/decorators.js';
 import {createBlob, decode, decodeAudioData} from './utils';
+import {getAssistantInstructions, PatientInfo} from './system_prompt';
 import './visual-3d';
 
 @customElement('gdm-live-audio')
@@ -16,6 +17,13 @@ export class GdmLiveAudio extends LitElement {
   @state() status = '';
   @state() error = '';
   @state() outputTranscription = '';
+
+  // Add patient info state
+  @state() patientInfo: PatientInfo = {
+    name: 'John Doe', // You can make this configurable
+    age: '35',
+    gender: 'Male'
+  };
 
   private client: GoogleGenAI;
   private session: Session;
@@ -196,22 +204,7 @@ export class GdmLiveAudio extends LitElement {
           systemInstruction: {
             parts: [
               {
-                text: `You are a professional medical assistant AI designed to provide helpful, accurate, and empathetic support. Your role includes:
-
-- Providing general health information and educational content
-- Helping users understand medical terminology and procedures
-- Offering guidance on when to seek professional medical care
-- Supporting users with wellness and preventive care information
-- Maintaining a caring, professional, and reassuring tone
-
-Important guidelines:
-- Always recommend consulting with healthcare professionals for medical diagnosis, treatment, or urgent concerns
-- Do not provide specific medical diagnoses or prescribe treatments
-- Emphasize the importance of professional medical care when appropriate
-- Be supportive and understanding of health-related anxieties
-- Provide information in clear, accessible language
-
-Remember: You are here to inform and support, not to replace professional medical advice.`
+                text: getAssistantInstructions(this.patientInfo)
               }
             ]
           },
