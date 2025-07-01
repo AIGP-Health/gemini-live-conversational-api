@@ -11,22 +11,35 @@ import {createBlob, decode, decodeAudioData} from './utils';
 import {getAssistantInstructions, PatientInfo} from './system_prompt';
 import './visual-3d';
 
+// Add type declarations at the top
+declare global {
+  interface Window {
+    SpeechRecognition: any;
+    webkitSpeechRecognition: any;
+  }
+  interface MediaDevices {
+    getDisplayMedia(constraints?: MediaStreamConstraints): Promise<MediaStream>;
+  }
+}
+
 @customElement('gdm-live-audio')
 export class GdmLiveAudio extends LitElement {
   @state() isRecording = false;
   @state() status = '';
   @state() error = '';
   @state() outputTranscription = '';
+  @state() inputTranscription = '';
 
   // Add patient info state
   @state() patientInfo: PatientInfo = {
-    name: 'John Doe', // You can make this configurable
+    name: 'John Doe',
     age: '35',
     gender: 'Male'
   };
 
   private client: GoogleGenAI;
   private session: Session;
+  private speechRecognition: SpeechRecognition | null = null;
   private inputAudioContext = new (window.AudioContext ||
     window.webkitAudioContext)({sampleRate: 16000});
   private outputAudioContext = new (window.AudioContext ||
@@ -38,6 +51,12 @@ export class GdmLiveAudio extends LitElement {
   private sourceNode: AudioBufferSourceNode;
   private scriptProcessorNode: ScriptProcessorNode;
   private sources = new Set<AudioBufferSourceNode>();
+  
+  // Add audio isolation properties
+  private microphoneStream: MediaStream | null = null;
+  private audioWorklet: AudioWorkletNode | null = null;
+  private isAIResponding = false;
+  private speechRecognitionTimeout: number | null = null;
 
   static styles = css`
     #status {
@@ -59,10 +78,24 @@ export class GdmLiveAudio extends LitElement {
       color: white;
       padding: 20px;
       border-radius: 10px;
-      max-height: 30vh;
+      max-height: 40vh;
       overflow-y: auto;
       font-family: Arial, sans-serif;
       line-height: 1.5;
+    }
+
+    .user-transcription {
+      color: #87CEEB;
+      margin-bottom: 10px;
+      border-left: 3px solid #87CEEB;
+      padding-left: 10px;
+    }
+
+    .ai-transcription {
+      color: #90EE90;
+      margin-bottom: 10px;
+      border-left: 3px solid #90EE90;
+      padding-left: 10px;
     }
 
     .controls {
@@ -104,6 +137,7 @@ export class GdmLiveAudio extends LitElement {
   constructor() {
     super();
     this.initClient();
+    this.initSpeechRecognition();
   }
 
   private initAudio() {
@@ -122,6 +156,102 @@ export class GdmLiveAudio extends LitElement {
     this.initSession();
   }
 
+  // Enhanced speech recognition with better isolation
+  private initSpeechRecognition() {
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      this.speechRecognition = new SpeechRecognition();
+      
+      this.speechRecognition.continuous = true;
+      this.speechRecognition.interimResults = true;
+      this.speechRecognition.lang = 'en-US';
+      this.speechRecognition.maxAlternatives = 1;
+      
+      this.speechRecognition.onresult = (event) => {
+        // Only process if AI is not currently responding
+        if (this.isAIResponding) {
+          console.log('Ignoring speech recognition during AI response');
+          return;
+        }
+
+        let interimTranscript = '';
+        let finalTranscript = '';
+        
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          const confidence = event.results[i][0].confidence;
+          
+          // Only use high-confidence results to avoid picking up AI audio
+          if (confidence === undefined || confidence > 0.7) {
+            if (event.results[i].isFinal) {
+              finalTranscript += transcript;
+            } else {
+              interimTranscript += transcript;
+            }
+          }
+        }
+        
+        // Show interim results (partial transcription)
+        if (finalTranscript || interimTranscript) {
+          this.inputTranscription = finalTranscript + interimTranscript;
+          this.requestUpdate();
+        }
+        
+        // Clear final transcript after a delay
+        if (finalTranscript) {
+          setTimeout(() => {
+            this.inputTranscription = '';
+            this.requestUpdate();
+          }, 3000);
+        }
+      };
+      
+      this.speechRecognition.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        
+        // Don't restart on certain errors
+        if (['network', 'not-allowed', 'service-not-allowed'].includes(event.error)) {
+          return;
+        }
+        
+        // Restart recognition on other errors, but not during AI response
+        if (event.error !== 'no-speech' && !this.isAIResponding) {
+          this.restartSpeechRecognition();
+        }
+      };
+      
+      this.speechRecognition.onend = () => {
+        // Only restart if still recording and AI is not responding
+        if (this.isRecording && !this.isAIResponding) {
+          this.restartSpeechRecognition();
+        }
+      };
+
+      this.speechRecognition.onstart = () => {
+        console.log('Speech recognition started');
+      };
+
+    } else {
+      console.warn('Speech recognition not supported in this browser');
+    }
+  }
+
+  private restartSpeechRecognition() {
+    if (this.speechRecognitionTimeout) {
+      clearTimeout(this.speechRecognitionTimeout);
+    }
+    
+    this.speechRecognitionTimeout = setTimeout(() => {
+      if (this.isRecording && !this.isAIResponding && this.speechRecognition) {
+        try {
+          this.speechRecognition.start();
+        } catch (e) {
+          console.log('Speech recognition restart error:', e);
+        }
+      }
+    }, 500);
+  }
+
   private async initSession() {
     const model = 'gemini-2.5-flash-preview-native-audio-dialog';
 
@@ -137,6 +267,10 @@ export class GdmLiveAudio extends LitElement {
               message.serverContent?.modelTurn?.parts[0]?.inlineData;
 
             if (audio) {
+              // Mark AI as responding and stop speech recognition
+              this.isAIResponding = true;
+              this.stopSpeechRecognitionTemporarily();
+
               this.nextStartTime = Math.max(
                 this.nextStartTime,
                 this.outputAudioContext.currentTime,
@@ -151,8 +285,16 @@ export class GdmLiveAudio extends LitElement {
               const source = this.outputAudioContext.createBufferSource();
               source.buffer = audioBuffer;
               source.connect(this.outputNode);
-              source.addEventListener('ended', () =>{
+              
+              source.addEventListener('ended', () => {
                 this.sources.delete(source);
+                // Resume speech recognition when all AI audio finishes
+                if (this.sources.size === 0) {
+                  setTimeout(() => {
+                    this.isAIResponding = false;
+                    this.startSpeechRecognitionSafely();
+                  }, 1000); // Wait 1 second after AI finishes to avoid picking up echo
+                }
               });
 
               source.start(this.nextStartTime);
@@ -168,7 +310,6 @@ export class GdmLiveAudio extends LitElement {
 
             // Clear transcription when turn is complete
             if (message.serverContent?.turnComplete) {
-              // Keep the transcription visible for a moment, then clear it
               setTimeout(() => {
                 this.outputTranscription = '';
                 this.requestUpdate();
@@ -177,14 +318,18 @@ export class GdmLiveAudio extends LitElement {
 
             const interrupted = message.serverContent?.interrupted;
             if(interrupted) {
+              // Stop all AI audio sources
               for(const source of this.sources.values()) {
                 source.stop();
                 this.sources.delete(source);
               }
               this.nextStartTime = 0;
-              // Clear transcription on interruption
               this.outputTranscription = '';
               this.requestUpdate();
+              
+              // Immediately mark AI as not responding and restart speech recognition
+              this.isAIResponding = false;
+              this.startSpeechRecognitionSafely();
             }
           },
           onerror: (e: ErrorEvent) => {
@@ -199,7 +344,6 @@ export class GdmLiveAudio extends LitElement {
           outputAudioTranscription: {},
           speechConfig: {
             voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Orus'}},
-            // languageCode: 'en-GB'
           },
           systemInstruction: {
             parts: [
@@ -229,19 +373,37 @@ export class GdmLiveAudio extends LitElement {
     }
 
     this.inputAudioContext.resume();
+    this.outputAudioContext.resume();
 
     this.updateStatus('Requesting microphone access...');
 
     try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
+      // Get microphone access with enhanced noise cancellation
+      this.microphoneStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 16000,
+          channelCount: 1,
+          // Add more constraints to isolate microphone input
+          suppressLocalAudioPlayback: true,
+          googEchoCancellation: true,
+          googAutoGainControl: true,
+          googNoiseSuppression: true,
+          googHighpassFilter: true,
+          googNoiseSuppression2: true,
+          googEchoCancellation2: true,
+          googAutoGainControl2: true,
+        },
         video: false,
       });
 
       this.updateStatus('Microphone access granted. Starting capture...');
 
+      // Set up audio processing for Gemini
       this.sourceNode = this.inputAudioContext.createMediaStreamSource(
-        this.mediaStream,
+        this.microphoneStream,
       );
       this.sourceNode.connect(this.inputNode);
 
@@ -258,14 +420,22 @@ export class GdmLiveAudio extends LitElement {
         const inputBuffer = audioProcessingEvent.inputBuffer;
         const pcmData = inputBuffer.getChannelData(0);
 
-        this.session.sendRealtimeInput({media: createBlob(pcmData)});
+        // Only send to Gemini if AI is not currently responding
+        if (!this.isAIResponding) {
+          this.session.sendRealtimeInput({media: createBlob(pcmData)});
+        }
       };
 
       this.sourceNode.connect(this.scriptProcessorNode);
       this.scriptProcessorNode.connect(this.inputAudioContext.destination);
 
+      // Start speech recognition after a brief delay
+      setTimeout(() => {
+        this.startSpeechRecognitionSafely();
+      }, 1000);
+
       this.isRecording = true;
-      this.updateStatus('🔴 Recording... Capturing PCM chunks.');
+      this.updateStatus('🔴 Recording... Use headphones for best results.');
     } catch (err) {
       console.error('Error starting recording:', err);
       this.updateStatus(`Error: ${err.message}`);
@@ -273,13 +443,42 @@ export class GdmLiveAudio extends LitElement {
     }
   }
 
+  private startSpeechRecognitionSafely() {
+    if (this.speechRecognition && this.isRecording && !this.isAIResponding) {
+      try {
+        this.speechRecognition.start();
+      } catch (e) {
+        console.log('Speech recognition already started or error:', e);
+      }
+    }
+  }
+
+  private stopSpeechRecognitionTemporarily() {
+    if (this.speechRecognition) {
+      try {
+        this.speechRecognition.stop();
+      } catch (e) {
+        console.log('Error stopping speech recognition:', e);
+      }
+    }
+    
+    if (this.speechRecognitionTimeout) {
+      clearTimeout(this.speechRecognitionTimeout);
+      this.speechRecognitionTimeout = null;
+    }
+  }
+
   private stopRecording() {
-    if (!this.isRecording && !this.mediaStream && !this.inputAudioContext)
+    if (!this.isRecording && !this.microphoneStream && !this.inputAudioContext)
       return;
 
     this.updateStatus('Stopping recording...');
 
     this.isRecording = false;
+    this.isAIResponding = false;
+
+    // Stop speech recognition
+    this.stopSpeechRecognitionTemporarily();
 
     if (this.scriptProcessorNode && this.sourceNode && this.inputAudioContext) {
       this.scriptProcessorNode.disconnect();
@@ -289,9 +488,10 @@ export class GdmLiveAudio extends LitElement {
     this.scriptProcessorNode = null;
     this.sourceNode = null;
 
-    if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach((track) => track.stop());
-      this.mediaStream = null;
+    // Stop microphone stream
+    if (this.microphoneStream) {
+      this.microphoneStream.getTracks().forEach((track) => track.stop());
+      this.microphoneStream = null;
     }
 
     this.updateStatus('Recording stopped. Click Start to begin again.');
@@ -300,6 +500,12 @@ export class GdmLiveAudio extends LitElement {
   private reset() {
     this.session?.close();
     this.outputTranscription = '';
+    this.inputTranscription = '';
+    this.isAIResponding = false;
+    
+    // Stop speech recognition
+    this.stopSpeechRecognitionTemporarily();
+    
     this.initSession();
     this.updateStatus('Session cleared.');
   }
@@ -307,10 +513,20 @@ export class GdmLiveAudio extends LitElement {
   render() {
     return html`
       <div>
-        ${this.outputTranscription ? html`
+        ${this.inputTranscription || this.outputTranscription ? html`
           <div id="transcription">
-            <strong>AI Assistant:</strong><br>
-            ${this.outputTranscription}
+            ${this.inputTranscription ? html`
+              <div class="user-transcription">
+                <strong>You:</strong><br>
+                ${this.inputTranscription}
+              </div>
+            ` : ''}
+            ${this.outputTranscription ? html`
+              <div class="ai-transcription">
+                <strong>AI Assistant:</strong><br>
+                ${this.outputTranscription}
+              </div>
+            ` : ''}
           </div>
         ` : ''}
 
