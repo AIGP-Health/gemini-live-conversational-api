@@ -16,6 +16,7 @@ export class GdmLiveAudio extends LitElement {
   @state() status = '';
   @state() error = '';
   @state() outputTranscription = '';
+  @state() inputTranscription = '';
 
   private client: GoogleGenAI;
   private session: Session;
@@ -115,7 +116,7 @@ export class GdmLiveAudio extends LitElement {
   }
 
   private async initSession() {
-    const model = 'gemini-2.5-flash-preview-native-audio-dialog';
+    const model = 'gemini-2.0-flash-live-001';
 
     try {
       this.session = await this.client.live.connect({
@@ -126,7 +127,7 @@ export class GdmLiveAudio extends LitElement {
           },
           onmessage: async (message: LiveServerMessage) => {
             const audio =
-              message.serverContent?.modelTurn?.parts[0]?.inlineData;
+              message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
 
             if (audio) {
               this.nextStartTime = Math.max(
@@ -152,7 +153,13 @@ export class GdmLiveAudio extends LitElement {
               this.sources.add(source);
             }
 
-            // Handle output transcription
+            // Handle input transcription (your voice)
+            if (message.serverContent?.inputTranscription?.text) {
+              this.inputTranscription += message.serverContent.inputTranscription.text;
+              this.requestUpdate();
+            }
+
+            // Handle output transcription (AI's voice)
             if (message.serverContent?.outputTranscription?.text) {
               this.outputTranscription += message.serverContent.outputTranscription.text;
               this.requestUpdate();
@@ -163,6 +170,7 @@ export class GdmLiveAudio extends LitElement {
               // Keep the transcription visible for a moment, then clear it
               setTimeout(() => {
                 this.outputTranscription = '';
+                this.inputTranscription = '';
                 this.requestUpdate();
               }, 2000);
             }
@@ -176,6 +184,7 @@ export class GdmLiveAudio extends LitElement {
               this.nextStartTime = 0;
               // Clear transcription on interruption
               this.outputTranscription = '';
+              this.inputTranscription = '';
               this.requestUpdate();
             }
           },
@@ -188,10 +197,10 @@ export class GdmLiveAudio extends LitElement {
         },
         config: {
           responseModalities: [Modality.AUDIO],
+          inputAudioTranscription: {},
           outputAudioTranscription: {},
           speechConfig: {
             voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Orus'}},
-            // languageCode: 'en-GB'
           },
           systemInstruction: {
             parts: [
@@ -265,6 +274,10 @@ Remember: You are here to inform and support, not to replace professional medica
         const inputBuffer = audioProcessingEvent.inputBuffer;
         const pcmData = inputBuffer.getChannelData(0);
 
+        // Convert PCM data to the correct format according to the documentation
+        const audioBlob = createBlob(pcmData);
+        
+        // Use the correct API format: sendRealtimeInput with media_chunks array
         this.session.sendRealtimeInput({media: createBlob(pcmData)});
       };
 
@@ -307,6 +320,7 @@ Remember: You are here to inform and support, not to replace professional medica
   private reset() {
     this.session?.close();
     this.outputTranscription = '';
+    this.inputTranscription = '';
     this.initSession();
     this.updateStatus('Session cleared.');
   }
@@ -314,10 +328,20 @@ Remember: You are here to inform and support, not to replace professional medica
   render() {
     return html`
       <div>
-        ${this.outputTranscription ? html`
+        ${this.inputTranscription || this.outputTranscription ? html`
           <div id="transcription">
-            <strong>AI Assistant:</strong><br>
-            ${this.outputTranscription}
+            ${this.inputTranscription ? html`
+              <div style="margin-bottom: 10px;">
+                <strong>You:</strong><br>
+                ${this.inputTranscription}
+              </div>
+            ` : ''}
+            ${this.outputTranscription ? html`
+              <div>
+                <strong>AI Assistant:</strong><br>
+                ${this.outputTranscription}
+              </div>
+            ` : ''}
           </div>
         ` : ''}
 
