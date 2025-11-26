@@ -4,23 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {GoogleGenAI, LiveServerMessage, Modality, Session} from '@google/genai';
 import {LitElement, css, html} from 'lit';
 import {customElement, state} from 'lit/decorators.js';
-import {createBlob, decode, decodeAudioData} from './utils';
-import {getAssistantInstructions, PatientInfo} from './system_prompt';
+import {decode, decodeAudioData, encode} from './utils';
+import {PatientInfo} from './system_prompt';
 import './visual-3d';
 
-// Add type declarations at the top
-declare global {
-  interface Window {
-    SpeechRecognition: any;
-    webkitSpeechRecognition: any;
-  }
-  interface MediaDevices {
-    getDisplayMedia(constraints?: MediaStreamConstraints): Promise<MediaStream>;
-  }
-}
+// Proxy server URL
+const PROXY_WS_URL = 'ws://localhost:3001/ws';
 
 @customElement('gdm-live-audio')
 export class GdmLiveAudio extends LitElement {
@@ -37,26 +28,21 @@ export class GdmLiveAudio extends LitElement {
     gender: 'Male'
   };
 
-  private client: GoogleGenAI;
-  private session: Session;
-  private speechRecognition: SpeechRecognition | null = null;
+  private ws: WebSocket | null = null;
   private inputAudioContext = new (window.AudioContext ||
-    window.webkitAudioContext)({sampleRate: 16000});
+    (window as any).webkitAudioContext)({sampleRate: 16000});
   private outputAudioContext = new (window.AudioContext ||
-    window.webkitAudioContext)({sampleRate: 24000});
+    (window as any).webkitAudioContext)({sampleRate: 24000});
   @state() inputNode = this.inputAudioContext.createGain();
   @state() outputNode = this.outputAudioContext.createGain();
   private nextStartTime = 0;
-  private mediaStream: MediaStream;
-  private sourceNode: AudioBufferSourceNode;
-  private scriptProcessorNode: ScriptProcessorNode;
+  private sourceNode: MediaStreamAudioSourceNode | null = null;
+  private scriptProcessorNode: ScriptProcessorNode | null = null;
   private sources = new Set<AudioBufferSourceNode>();
-  
+
   // Add audio isolation properties
   private microphoneStream: MediaStream | null = null;
-  private audioWorklet: AudioWorkletNode | null = null;
-  private isAIResponding = false;
-  private speechRecognitionTimeout: number | null = null;
+  private isSessionConnected = false;
 
   static styles = css`
     #status {
@@ -136,226 +122,129 @@ export class GdmLiveAudio extends LitElement {
 
   constructor() {
     super();
-    this.initClient();
-    this.initSpeechRecognition();
+    this.initAudio();
+    this.connectToProxy();
   }
 
   private initAudio() {
     this.nextStartTime = this.outputAudioContext.currentTime;
-  }
-
-  private async initClient() {
-    this.initAudio();
-
-    this.client = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-    });
-
     this.outputNode.connect(this.outputAudioContext.destination);
-
-    this.initSession();
   }
 
-  // Enhanced speech recognition with better isolation
-  private initSpeechRecognition() {
-    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      this.speechRecognition = new SpeechRecognition();
-      
-      this.speechRecognition.continuous = true;
-      this.speechRecognition.interimResults = true;
-      this.speechRecognition.lang = 'en-US';
-      this.speechRecognition.maxAlternatives = 1;
-      
-      this.speechRecognition.onresult = (event) => {
-        // Only process if AI is not currently responding
-        if (this.isAIResponding) {
-          console.log('Ignoring speech recognition during AI response');
-          return;
-        }
+  private connectToProxy() {
+    this.updateStatus('Connecting to Vertex AI via proxy...');
+    console.log('Connecting to proxy:', PROXY_WS_URL);
 
-        let interimTranscript = '';
-        let finalTranscript = '';
-        
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript;
-          const confidence = event.results[i][0].confidence;
-          
-          // Only use high-confidence results to avoid picking up AI audio
-          if (confidence === undefined || confidence > 0.7) {
-            if (event.results[i].isFinal) {
-              finalTranscript += transcript;
-            } else {
-              interimTranscript += transcript;
-            }
-          }
-        }
-        
-        // Show interim results (partial transcription)
-        if (finalTranscript || interimTranscript) {
-          this.inputTranscription = finalTranscript + interimTranscript;
-          this.requestUpdate();
-        }
-        
-        // Clear final transcript after a delay
-        if (finalTranscript) {
-          setTimeout(() => {
-            this.inputTranscription = '';
-            this.requestUpdate();
-          }, 3000);
-        }
-      };
-      
-      this.speechRecognition.onerror = (event) => {
-        console.error('Speech recognition error:', event.error);
-        
-        // Don't restart on certain errors
-        if (['network', 'not-allowed', 'service-not-allowed'].includes(event.error)) {
-          return;
-        }
-        
-        // Restart recognition on other errors, but not during AI response
-        if (event.error !== 'no-speech' && !this.isAIResponding) {
-          this.restartSpeechRecognition();
-        }
-      };
-      
-      this.speechRecognition.onend = () => {
-        // Only restart if still recording and AI is not responding
-        if (this.isRecording && !this.isAIResponding) {
-          this.restartSpeechRecognition();
-        }
-      };
+    this.ws = new WebSocket(PROXY_WS_URL);
 
-      this.speechRecognition.onstart = () => {
-        console.log('Speech recognition started');
-      };
+    this.ws.onopen = () => {
+      console.log('Connected to proxy server');
+      this.updateStatus('Connected to proxy. Waiting for Vertex AI session...');
+    };
 
-    } else {
-      console.warn('Speech recognition not supported in this browser');
-    }
-  }
+    this.ws.onmessage = async (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        console.log('Received from proxy:', message);
 
-  private restartSpeechRecognition() {
-    if (this.speechRecognitionTimeout) {
-      clearTimeout(this.speechRecognitionTimeout);
-    }
-    
-    this.speechRecognitionTimeout = setTimeout(() => {
-      if (this.isRecording && !this.isAIResponding && this.speechRecognition) {
-        try {
-          this.speechRecognition.start();
-        } catch (e) {
-          console.log('Speech recognition restart error:', e);
+        if (message.type === 'session_open') {
+          this.isSessionConnected = true;
+          this.updateStatus('Connected! Click Start to begin.');
+        } else if (message.type === 'error') {
+          this.updateError(message.message);
+          this.isSessionConnected = false;
+        } else if (message.type === 'session_close') {
+          this.isSessionConnected = false;
+          this.updateStatus('Session closed. Reconnecting...');
+          setTimeout(() => this.connectToProxy(), 2000);
+        } else if (message.type === 'message' && message.data) {
+          await this.handleGeminiMessage(message.data);
         }
+      } catch (e) {
+        console.error('Error parsing message:', e);
       }
-    }, 500);
+    };
+
+    this.ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      this.updateError('Connection error. Make sure proxy server is running.');
+      this.isSessionConnected = false;
+    };
+
+    this.ws.onclose = () => {
+      console.log('WebSocket closed');
+      this.isSessionConnected = false;
+      this.updateStatus('Disconnected. Reconnecting in 3 seconds...');
+      setTimeout(() => this.connectToProxy(), 3000);
+    };
   }
 
-  private async initSession() {
-    const model = 'gemini-2.5-flash-preview-native-audio-dialog';
+  private async handleGeminiMessage(message: any) {
+    // Handle audio data
+    const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
 
-    try {
-      this.session = await this.client.live.connect({
-        model: model,
-        callbacks: {
-          onopen: () => {
-            this.updateStatus('Opened');
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            const audio =
-              message.serverContent?.modelTurn?.parts[0]?.inlineData;
+    if (audio?.data) {
+      console.log('Received audio data, playing...');
 
-            if (audio) {
-              // Mark AI as responding and stop speech recognition
-              this.isAIResponding = true;
-              this.stopSpeechRecognitionTemporarily();
+      // Ensure audio context is running
+      if (this.outputAudioContext.state === 'suspended') {
+        await this.outputAudioContext.resume();
+      }
 
-              this.nextStartTime = Math.max(
-                this.nextStartTime,
-                this.outputAudioContext.currentTime,
-              );
+      this.nextStartTime = Math.max(
+        this.nextStartTime,
+        this.outputAudioContext.currentTime,
+      );
 
-              const audioBuffer = await decodeAudioData(
-                decode(audio.data),
-                this.outputAudioContext,
-                24000,
-                1,
-              );
-              const source = this.outputAudioContext.createBufferSource();
-              source.buffer = audioBuffer;
-              source.connect(this.outputNode);
-              
-              source.addEventListener('ended', () => {
-                this.sources.delete(source);
-                // Resume speech recognition when all AI audio finishes
-                if (this.sources.size === 0) {
-                  setTimeout(() => {
-                    this.isAIResponding = false;
-                    this.startSpeechRecognitionSafely();
-                  }, 1000); // Wait 1 second after AI finishes to avoid picking up echo
-                }
-              });
+      const audioBuffer = await decodeAudioData(
+        decode(audio.data),
+        this.outputAudioContext,
+        24000,
+        1,
+      );
+      const source = this.outputAudioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(this.outputNode);
 
-              source.start(this.nextStartTime);
-              this.nextStartTime = this.nextStartTime + audioBuffer.duration;
-              this.sources.add(source);
-            }
-
-            // Handle output transcription
-            if (message.serverContent?.outputTranscription?.text) {
-              this.outputTranscription += message.serverContent.outputTranscription.text;
-              this.requestUpdate();
-            }
-
-            // Clear transcription when turn is complete
-            if (message.serverContent?.turnComplete) {
-              setTimeout(() => {
-                this.outputTranscription = '';
-                this.requestUpdate();
-              }, 2000);
-            }
-
-            const interrupted = message.serverContent?.interrupted;
-            if(interrupted) {
-              // Stop all AI audio sources
-              for(const source of this.sources.values()) {
-                source.stop();
-                this.sources.delete(source);
-              }
-              this.nextStartTime = 0;
-              this.outputTranscription = '';
-              this.requestUpdate();
-              
-              // Immediately mark AI as not responding and restart speech recognition
-              this.isAIResponding = false;
-              this.startSpeechRecognitionSafely();
-            }
-          },
-          onerror: (e: ErrorEvent) => {
-            this.updateError(e.message);
-          },
-          onclose: (e: CloseEvent) => {
-            this.updateStatus('Close:' + e.reason);
-          },
-        },
-        config: {
-          responseModalities: [Modality.AUDIO],
-          outputAudioTranscription: {},
-          speechConfig: {
-            voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Orus'}},
-          },
-          systemInstruction: {
-            parts: [
-              {
-                text: getAssistantInstructions(this.patientInfo)
-              }
-            ]
-          },
-        },
+      source.addEventListener('ended', () => {
+        this.sources.delete(source);
       });
-    } catch (e) {
-      console.error(e);
+
+      source.start(this.nextStartTime);
+      this.nextStartTime = this.nextStartTime + audioBuffer.duration;
+      this.sources.add(source);
+    }
+
+    // Handle input transcription (user's speech transcribed by Gemini)
+    if (message.serverContent?.inputTranscription?.text) {
+      this.inputTranscription = message.serverContent.inputTranscription.text;
+      this.requestUpdate();
+    }
+
+    // Handle output transcription (AI's speech transcribed by Gemini)
+    if (message.serverContent?.outputTranscription?.text) {
+      this.outputTranscription += message.serverContent.outputTranscription.text;
+      this.requestUpdate();
+    }
+
+    // Clear transcriptions when turn is complete
+    if (message.serverContent?.turnComplete) {
+      setTimeout(() => {
+        this.outputTranscription = '';
+        this.inputTranscription = '';
+        this.requestUpdate();
+      }, 2000);
+    }
+
+    // Handle interruption
+    if (message.serverContent?.interrupted) {
+      for (const source of this.sources.values()) {
+        source.stop();
+        this.sources.delete(source);
+      }
+      this.nextStartTime = 0;
+      this.outputTranscription = '';
+      this.requestUpdate();
     }
   }
 
@@ -386,22 +275,13 @@ export class GdmLiveAudio extends LitElement {
           autoGainControl: true,
           sampleRate: 16000,
           channelCount: 1,
-          // Add more constraints to isolate microphone input
-          suppressLocalAudioPlayback: true,
-          googEchoCancellation: true,
-          googAutoGainControl: true,
-          googNoiseSuppression: true,
-          googHighpassFilter: true,
-          googNoiseSuppression2: true,
-          googEchoCancellation2: true,
-          googAutoGainControl2: true,
         },
         video: false,
       });
 
       this.updateStatus('Microphone access granted. Starting capture...');
 
-      // Set up audio processing for Gemini
+      // Set up audio processing
       this.sourceNode = this.inputAudioContext.createMediaStreamSource(
         this.microphoneStream,
       );
@@ -415,56 +295,42 @@ export class GdmLiveAudio extends LitElement {
       );
 
       this.scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
-        if (!this.isRecording) return;
+        if (!this.isRecording || !this.isSessionConnected || !this.ws) {
+          return;
+        }
 
         const inputBuffer = audioProcessingEvent.inputBuffer;
         const pcmData = inputBuffer.getChannelData(0);
 
-        // Only send to Gemini if AI is not currently responding
-        if (!this.isAIResponding) {
-          this.session.sendRealtimeInput({media: createBlob(pcmData)});
+        // Convert Float32Array to Int16 PCM and then base64
+        const int16 = new Int16Array(pcmData.length);
+        for (let i = 0; i < pcmData.length; i++) {
+          int16[i] = pcmData[i] * 32768;
+        }
+        const base64Data = encode(new Uint8Array(int16.buffer));
+
+        // Send audio to proxy server
+        try {
+          if (this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({
+              type: 'audio',
+              data: base64Data,
+            }));
+          }
+        } catch (e) {
+          console.error('Error sending audio data:', e);
         }
       };
 
       this.sourceNode.connect(this.scriptProcessorNode);
       this.scriptProcessorNode.connect(this.inputAudioContext.destination);
 
-      // Start speech recognition after a brief delay
-      setTimeout(() => {
-        this.startSpeechRecognitionSafely();
-      }, 1000);
-
       this.isRecording = true;
       this.updateStatus('🔴 Recording... Use headphones for best results.');
     } catch (err) {
       console.error('Error starting recording:', err);
-      this.updateStatus(`Error: ${err.message}`);
+      this.updateStatus(`Error: ${err instanceof Error ? err.message : String(err)}`);
       this.stopRecording();
-    }
-  }
-
-  private startSpeechRecognitionSafely() {
-    if (this.speechRecognition && this.isRecording && !this.isAIResponding) {
-      try {
-        this.speechRecognition.start();
-      } catch (e) {
-        console.log('Speech recognition already started or error:', e);
-      }
-    }
-  }
-
-  private stopSpeechRecognitionTemporarily() {
-    if (this.speechRecognition) {
-      try {
-        this.speechRecognition.stop();
-      } catch (e) {
-        console.log('Error stopping speech recognition:', e);
-      }
-    }
-    
-    if (this.speechRecognitionTimeout) {
-      clearTimeout(this.speechRecognitionTimeout);
-      this.speechRecognitionTimeout = null;
     }
   }
 
@@ -475,10 +341,6 @@ export class GdmLiveAudio extends LitElement {
     this.updateStatus('Stopping recording...');
 
     this.isRecording = false;
-    this.isAIResponding = false;
-
-    // Stop speech recognition
-    this.stopSpeechRecognitionTemporarily();
 
     if (this.scriptProcessorNode && this.sourceNode && this.inputAudioContext) {
       this.scriptProcessorNode.disconnect();
@@ -498,15 +360,10 @@ export class GdmLiveAudio extends LitElement {
   }
 
   private reset() {
-    this.session?.close();
+    this.ws?.close();
     this.outputTranscription = '';
     this.inputTranscription = '';
-    this.isAIResponding = false;
-    
-    // Stop speech recognition
-    this.stopSpeechRecognitionTemporarily();
-    
-    this.initSession();
+    this.connectToProxy();
     this.updateStatus('Session cleared.');
   }
 
@@ -573,7 +430,7 @@ export class GdmLiveAudio extends LitElement {
           </button>
         </div>
 
-        <div id="status"> ${this.error} </div>
+        <div id="status"> ${this.status || this.error} </div>
         <gdm-live-audio-visuals-3d
           .inputNode=${this.inputNode}
           .outputNode=${this.outputNode}></gdm-live-audio-visuals-3d>
