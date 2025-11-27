@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Credentials
+sylvan-cocoa-467005-c4-c4c38ee3f6b9.json

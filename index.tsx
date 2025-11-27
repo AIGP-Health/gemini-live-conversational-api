@@ -13,13 +13,23 @@ import './visual-3d';
 // Proxy server URL
 const PROXY_WS_URL = 'ws://localhost:3001/ws';
 
+// Type for conversation entries
+interface ConversationEntry {
+  role: 'user' | 'ai';
+  text: string;
+}
+
 @customElement('gdm-live-audio')
 export class GdmLiveAudio extends LitElement {
   @state() isRecording = false;
   @state() status = '';
   @state() error = '';
-  @state() outputTranscription = '';
-  @state() inputTranscription = '';
+
+  // Conversation history - stores all completed transcriptions
+  @state() conversationHistory: ConversationEntry[] = [];
+  // Current in-progress transcriptions (while speaking)
+  @state() currentUserInput = '';
+  @state() currentAiOutput = '';
 
   // Add patient info state
   @state() patientInfo: PatientInfo = {
@@ -43,6 +53,9 @@ export class GdmLiveAudio extends LitElement {
   // Add audio isolation properties
   private microphoneStream: MediaStream | null = null;
   private isSessionConnected = false;
+
+  // Reference to transcription container for auto-scroll
+  private transcriptionContainer: HTMLElement | null = null;
 
   static styles = css`
     #status {
@@ -68,6 +81,7 @@ export class GdmLiveAudio extends LitElement {
       overflow-y: auto;
       font-family: Arial, sans-serif;
       line-height: 1.5;
+      scroll-behavior: smooth;
     }
 
     .user-transcription {
@@ -145,7 +159,21 @@ export class GdmLiveAudio extends LitElement {
     this.ws.onmessage = async (event) => {
       try {
         const message = JSON.parse(event.data);
-        console.log('Received from proxy:', message);
+        console.log(`[${new Date().toISOString()}] Received from proxy:`, message.type);
+
+        // Log all transcription messages for debugging
+        if (message.type === 'message' && message.data?.serverContent) {
+          const sc = message.data.serverContent;
+          if (sc.inputTranscription) {
+            console.log(`[TRANSCRIPTION - USER INPUT] ${new Date().toISOString()}:`, sc.inputTranscription);
+          }
+          if (sc.outputTranscription) {
+            console.log(`[TRANSCRIPTION - AI OUTPUT] ${new Date().toISOString()}:`, sc.outputTranscription);
+          }
+          if (sc.turnComplete) {
+            console.log(`[TRANSCRIPTION - TURN COMPLETE] ${new Date().toISOString()}`);
+          }
+        }
 
         if (message.type === 'session_open') {
           this.isSessionConnected = true;
@@ -215,25 +243,42 @@ export class GdmLiveAudio extends LitElement {
       this.sources.add(source);
     }
 
-    // Handle input transcription (user's speech transcribed by Gemini)
+    // Handle input transcription (user's speech) - ACCUMULATE chunks
     if (message.serverContent?.inputTranscription?.text) {
-      this.inputTranscription = message.serverContent.inputTranscription.text;
+      this.currentUserInput += message.serverContent.inputTranscription.text;
       this.requestUpdate();
+      this.scrollToBottom();
     }
 
-    // Handle output transcription (AI's speech transcribed by Gemini)
+    // When user input is finished, add to conversation history
+    if (message.serverContent?.inputTranscription?.finished) {
+      if (this.currentUserInput.trim()) {
+        this.conversationHistory = [...this.conversationHistory,
+          { role: 'user', text: this.currentUserInput.trim() }
+        ];
+        this.currentUserInput = '';
+      }
+      this.requestUpdate();
+      this.scrollToBottom();
+    }
+
+    // Handle output transcription (AI's speech) - ACCUMULATE chunks
     if (message.serverContent?.outputTranscription?.text) {
-      this.outputTranscription += message.serverContent.outputTranscription.text;
+      this.currentAiOutput += message.serverContent.outputTranscription.text;
       this.requestUpdate();
+      this.scrollToBottom();
     }
 
-    // Clear transcriptions when turn is complete
+    // When turn is complete, add AI output to history (don't clear everything)
     if (message.serverContent?.turnComplete) {
-      setTimeout(() => {
-        this.outputTranscription = '';
-        this.inputTranscription = '';
-        this.requestUpdate();
-      }, 2000);
+      if (this.currentAiOutput.trim()) {
+        this.conversationHistory = [...this.conversationHistory,
+          { role: 'ai', text: this.currentAiOutput.trim() }
+        ];
+        this.currentAiOutput = '';
+      }
+      this.requestUpdate();
+      this.scrollToBottom();
     }
 
     // Handle interruption
@@ -243,7 +288,7 @@ export class GdmLiveAudio extends LitElement {
         this.sources.delete(source);
       }
       this.nextStartTime = 0;
-      this.outputTranscription = '';
+      this.currentAiOutput = '';
       this.requestUpdate();
     }
   }
@@ -254,6 +299,16 @@ export class GdmLiveAudio extends LitElement {
 
   private updateError(msg: string) {
     this.error = msg;
+  }
+
+  // Scroll transcription container to bottom
+  private scrollToBottom() {
+    setTimeout(() => {
+      const container = this.shadowRoot?.querySelector('#transcription');
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+      }
+    }, 0);
   }
 
   private async startRecording() {
@@ -361,27 +416,36 @@ export class GdmLiveAudio extends LitElement {
 
   private reset() {
     this.ws?.close();
-    this.outputTranscription = '';
-    this.inputTranscription = '';
+    this.conversationHistory = [];
+    this.currentUserInput = '';
+    this.currentAiOutput = '';
     this.connectToProxy();
     this.updateStatus('Session cleared.');
   }
 
   render() {
+    const hasContent = this.conversationHistory.length > 0 || this.currentUserInput || this.currentAiOutput;
+
     return html`
       <div>
-        ${this.inputTranscription || this.outputTranscription ? html`
+        ${hasContent ? html`
           <div id="transcription">
-            ${this.inputTranscription ? html`
-              <div class="user-transcription">
-                <strong>You:</strong><br>
-                ${this.inputTranscription}
+            ${this.conversationHistory.map(entry => html`
+              <div class="${entry.role === 'user' ? 'user-transcription' : 'ai-transcription'}">
+                <strong>${entry.role === 'user' ? 'You:' : 'AI Assistant:'}</strong><br>
+                ${entry.text}
+              </div>
+            `)}
+            ${this.currentUserInput ? html`
+              <div class="user-transcription" style="opacity: 0.7">
+                <strong>You (speaking):</strong><br>
+                ${this.currentUserInput}
               </div>
             ` : ''}
-            ${this.outputTranscription ? html`
-              <div class="ai-transcription">
-                <strong>AI Assistant:</strong><br>
-                ${this.outputTranscription}
+            ${this.currentAiOutput ? html`
+              <div class="ai-transcription" style="opacity: 0.7">
+                <strong>AI Assistant (speaking):</strong><br>
+                ${this.currentAiOutput}
               </div>
             ` : ''}
           </div>
