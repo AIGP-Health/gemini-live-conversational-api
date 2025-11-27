@@ -5,7 +5,7 @@
 
 import express from 'express';
 import cors from 'cors';
-import { GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI, Modality, StartSensitivity, EndSensitivity } from '@google/genai';
 import { GoogleAuth } from 'google-auth-library';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
@@ -357,6 +357,17 @@ wss.on('connection', async (clientWs, req) => {
         },
         systemInstruction: {
           parts: [{ text: getAssistantInstructions(defaultPatientInfo) }]
+        },
+        // VAD settings for better detection of short utterances like "yes", "no"
+        // Increased prefixPaddingMs to capture beginning of speech for transcription
+        realtimeInputConfig: {
+          automaticActivityDetection: {
+            disabled: false,
+            startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_HIGH,
+            endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
+            prefixPaddingMs: 300,    // Increased to 300ms to capture first words for transcription
+            silenceDurationMs: 500,  // Wait 500ms of silence before ending
+          }
         },
       },
     });
