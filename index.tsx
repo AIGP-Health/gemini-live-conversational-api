@@ -10,8 +10,10 @@ import {decode, decodeAudioData, encode} from './utils';
 import {PatientInfo} from './system_prompt';
 import './visual-3d';
 
-// Proxy server URL
-const PROXY_WS_URL = 'ws://localhost:3001/ws';
+// Proxy server URL - dynamic based on environment
+const PROXY_WS_URL = import.meta.env.PROD
+  ? `wss://${window.location.host}/ws`
+  : 'ws://localhost:3001/ws';
 
 // Type for conversation entries
 interface ConversationEntry {

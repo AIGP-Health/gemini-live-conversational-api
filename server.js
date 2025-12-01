@@ -1,6 +1,10 @@
 /**
  * Proxy server for Vertex AI authentication
  * Uses @google/genai SDK with service account for Live API
+ *
+ * Environment Support:
+ * - Local: Uses service account JSON file (sylvan-cocoa-467005-c4)
+ * - Production (Cloud Run): Uses built-in service account identity (cosmic-surface-479409-r8)
  */
 
 import express from 'express';
@@ -20,13 +24,33 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Load service account credentials
-const SERVICE_ACCOUNT_PATH = path.join(__dirname, 'sylvan-cocoa-467005-c4-c4c38ee3f6b9.json');
-const credentials = JSON.parse(fs.readFileSync(SERVICE_ACCOUNT_PATH, 'utf8'));
-const PROJECT_ID = credentials.project_id;
-const LOCATION = 'us-central1';
+// Environment detection
+const isProduction = process.env.NODE_ENV === 'production' || process.env.K_SERVICE;
+
+// Configuration based on environment
+let PROJECT_ID;
+const LOCATION = process.env.VERTEX_AI_LOCATION || 'us-central1';
+
+if (isProduction) {
+  // Production: Use environment variable (set by Cloud Run)
+  PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT;
+  console.log('Running in production mode');
+} else {
+  // Local development: Use service account JSON file
+  const SERVICE_ACCOUNT_PATH = path.join(__dirname, 'sylvan-cocoa-467005-c4-c4c38ee3f6b9.json');
+  if (fs.existsSync(SERVICE_ACCOUNT_PATH)) {
+    const credentials = JSON.parse(fs.readFileSync(SERVICE_ACCOUNT_PATH, 'utf8'));
+    PROJECT_ID = credentials.project_id;
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = SERVICE_ACCOUNT_PATH;
+  } else {
+    console.error('Service account file not found for local development');
+    process.exit(1);
+  }
+  console.log('Running in local development mode');
+}
 
 console.log('Using project:', PROJECT_ID);
+console.log('Using location:', LOCATION);
 
 // System prompt for the medical assistant
 const getAssistantInstructions = (patientInfo) => `
@@ -295,15 +319,32 @@ const defaultPatientInfo = {
   gender: 'Male'
 };
 
-// Set environment variable for Google Auth
-process.env.GOOGLE_APPLICATION_CREDENTIALS = SERVICE_ACCOUNT_PATH;
-
 const server = http.createServer(app);
+
+// Configure WebSocket server timeout for long-running sessions (60 minutes)
+server.timeout = 0; // Disable timeout (Cloud Run handles this via --timeout flag)
+server.keepAliveTimeout = 3600000; // 60 minutes in ms
+
 const wss = new WebSocketServer({ server, path: '/ws' });
+
+// In production, serve the built frontend
+if (isProduction) {
+  const distPath = path.join(__dirname, 'dist');
+  app.use(express.static(distPath));
+
+  // Serve index.html for all non-API routes (SPA support)
+  // Express 5 requires named params, use regex-like pattern for catch-all
+  app.get('/{*path}', (req, res, next) => {
+    if (req.path.startsWith('/ws') || req.path === '/health') {
+      return next();
+    }
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+}
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', project: PROJECT_ID });
+  res.json({ status: 'ok', project: PROJECT_ID, mode: isProduction ? 'production' : 'development' });
 });
 
 // Store active sessions
@@ -415,10 +456,12 @@ wss.on('connection', async (clientWs, req) => {
   }
 });
 
-const PORT = 3001;
+// Use PORT from environment (Cloud Run provides this) or default to 3001 for local dev
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`\n🚀 Proxy server running on http://localhost:${PORT}`);
-  console.log(`📡 WebSocket proxy available at ws://localhost:${PORT}/ws`);
+  console.log(`\n🚀 Server running on port ${PORT}`);
+  console.log(`📡 WebSocket available at /ws`);
   console.log(`📋 Project: ${PROJECT_ID}`);
-  console.log(`📍 Location: ${LOCATION}\n`);
+  console.log(`📍 Location: ${LOCATION}`);
+  console.log(`🔧 Mode: ${isProduction ? 'production' : 'development'}\n`);
 });

@@ -1,0 +1,40 @@
+# Dependencies
+node_modules
+
+# Build output (will be built in Docker)
+dist
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment files (secrets)
+.env
+.env.*
+*.env
+
+# Service account files (never include in Docker image)
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+
+# Documentation
+*.md
+LICENSE
+
+# Test files
+*.test.*
+*.spec.*
+__tests__
+
+# Misc
+.DS_Store
+Thumbs.db
+*.log

@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+
+# Dependencies (will be installed during build)
+node_modules
+
+# Build output (will be built during Cloud Build)
+dist
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment files (secrets - use Secret Manager instead)
+.env
+.env.*
+*.env
+
+# Service account files (NEVER upload - use Cloud Run service account)
+sylvan-cocoa-*.json
+*-service-acct*.json
+
+# Documentation
+*.md
+LICENSE
+
+# Test files
+*.test.*
+*.spec.*
+__tests__
+
+# Claude Code plans
+.claude
+
+# Misc
+.DS_Store
+Thumbs.db
+*.log
