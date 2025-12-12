@@ -368,6 +368,135 @@ wss.on('connection', async (clientWs, req) => {
     });
 
     // ============================================
+    // PLAYGROUND MODE: Test Gemini with custom config
+    // ============================================
+    if (mode === 'playground') {
+      console.log('Setting up playground mode');
+
+      // Store session info
+      sessions.set(sessionId, { type: 'playground' });
+
+      // Notify client that session is ready
+      clientWs.send(JSON.stringify({ type: 'session_open', mode: 'playground' }));
+
+      // Handle incoming playground requests
+      clientWs.on('message', async (data) => {
+        try {
+          const message = JSON.parse(data.toString());
+
+          if (message.type === 'playground_request') {
+            const {
+              model,
+              systemInstruction,
+              userPrompt,
+              responseJsonSchema,
+              useStructuredOutput,
+              temperature,
+              topK,
+              topP,
+              maxOutputTokens
+            } = message;
+
+            console.log(`Playground request: model=${model}, structured=${useStructuredOutput}`);
+
+            // Build generation config
+            const config = {};
+            if (temperature !== undefined) config.temperature = temperature;
+            if (topK !== undefined) config.topK = topK;
+            if (topP !== undefined) config.topP = topP;
+            if (maxOutputTokens !== undefined) config.maxOutputTokens = maxOutputTokens;
+            if (systemInstruction) config.systemInstruction = systemInstruction;
+
+            // Configure structured output if enabled
+            if (useStructuredOutput && responseJsonSchema) {
+              config.responseMimeType = 'application/json';
+              config.responseSchema = responseJsonSchema;
+            }
+
+            const startTime = Date.now();
+
+            try {
+              // Build contents array for generateContentStream
+              const contents = [];
+              if (systemInstruction) {
+                contents.push({
+                  role: 'user',
+                  parts: [{ text: `System Instructions: ${systemInstruction}\n\nUser Request: ${userPrompt}` }]
+                });
+              } else {
+                contents.push({
+                  role: 'user',
+                  parts: [{ text: userPrompt }]
+                });
+              }
+
+              // Use generateContentStream directly for streaming responses
+              const stream = await client.models.generateContentStream({
+                model: model,
+                contents: contents,
+                config: config,
+              });
+
+              let fullText = '';
+              let usageMetadata = null;
+
+              for await (const chunk of stream) {
+                if (chunk.text) {
+                  fullText += chunk.text;
+                  clientWs.send(JSON.stringify({
+                    type: 'playground_chunk',
+                    text: chunk.text
+                  }));
+                }
+                if (chunk.usageMetadata) {
+                  usageMetadata = chunk.usageMetadata;
+                }
+              }
+
+              const latencyMs = Date.now() - startTime;
+
+              // Parse final response for structured output
+              let finalResponse = fullText;
+              if (useStructuredOutput) {
+                try {
+                  finalResponse = JSON.parse(fullText);
+                } catch {
+                  // Keep as string if parsing fails
+                }
+              }
+
+              // Signal completion with metadata
+              clientWs.send(JSON.stringify({
+                type: 'playground_complete',
+                response: finalResponse,
+                metadata: {
+                  model,
+                  totalTokens: usageMetadata?.totalTokenCount,
+                  latencyMs,
+                }
+              }));
+            } catch (streamError) {
+              console.error('Playground streaming error:', streamError);
+              clientWs.send(JSON.stringify({
+                type: 'playground_error',
+                error: streamError.message
+              }));
+            }
+          }
+        } catch (error) {
+          console.error('Error processing playground message:', error);
+        }
+      });
+
+      clientWs.on('close', () => {
+        console.log('Playground client disconnected:', sessionId);
+        sessions.delete(sessionId);
+      });
+
+      return; // Exit early for playground mode
+    }
+
+    // ============================================
     // TEXT MODE: Use Standard Streaming API
     // ============================================
     if (mode === 'text') {

@@ -9,6 +9,7 @@ import {customElement, state} from 'lit/decorators.js';
 import {decode, decodeAudioData, encode} from './utils';
 import {PatientInfo} from './system_prompt';
 import './visual-3d';
+import './playground';
 
 // Proxy server URL - dynamic based on environment
 const PROXY_WS_URL = import.meta.env.PROD
@@ -22,7 +23,7 @@ interface ConversationEntry {
 }
 
 // Type for interaction mode
-type InteractionMode = 'voice' | 'text';
+type InteractionMode = 'voice' | 'text' | 'playground';
 
 @customElement('gdm-live-audio')
 export class GdmLiveAudio extends LitElement {
@@ -687,7 +688,7 @@ export class GdmLiveAudio extends LitElement {
           </div>
         ` : ''}
 
-        ${hasContent ? html`
+        ${hasContent && this.mode !== 'playground' ? html`
           <div id="transcription">
             ${this.conversationHistory.map(entry => html`
               <div class="${entry.role === 'user' ? 'user-transcription' : 'ai-transcription'}">
@@ -710,7 +711,7 @@ export class GdmLiveAudio extends LitElement {
           </div>
         ` : ''}
 
-        <div class="controls">
+        <div class="controls" style="${this.mode === 'playground' ? 'bottom: auto; top: 2vh;' : ''}">
           <!-- Mode Toggle -->
           <div class="mode-toggle">
             <button
@@ -724,6 +725,12 @@ export class GdmLiveAudio extends LitElement {
               ?disabled=${this.isRecording}
               @click=${() => this.requestModeSwitch('text')}>
               <span>Text</span>
+            </button>
+            <button
+              class="${this.mode === 'playground' ? 'active' : ''}"
+              ?disabled=${this.isRecording}
+              @click=${() => this.requestModeSwitch('playground')}>
+              <span>Playground</span>
             </button>
           </div>
 
@@ -791,11 +798,16 @@ export class GdmLiveAudio extends LitElement {
           </div>
         ` : ''}
 
-        <div id="status"> ${this.status || this.error} </div>
+        <!-- Playground Mode -->
+        ${this.mode === 'playground' ? html`
+          <gemini-playground></gemini-playground>
+        ` : ''}
+
+        <div id="status" style="${this.mode === 'playground' ? 'display: none;' : ''}"> ${this.status || this.error} </div>
         <gdm-live-audio-visuals-3d
           .inputNode=${this.inputNode}
           .outputNode=${this.outputNode}
-          ?frozen=${this.mode === 'text'}></gdm-live-audio-visuals-3d>
+          ?frozen=${this.mode !== 'voice'}></gdm-live-audio-visuals-3d>
       </div>
     `;
   }
