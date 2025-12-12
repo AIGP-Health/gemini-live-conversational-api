@@ -44,7 +44,7 @@ export const DEFAULT_CONFIG: PlaygroundConfig = {
   temperature: 1.0,
   topK: 40,
   topP: 0.95,
-  maxOutputTokens: 8192,
+  maxOutputTokens: 1024,
 };
 
 export const EXAMPLE_JSON_SCHEMA = `{

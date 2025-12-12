@@ -26,8 +26,12 @@ export class GeminiPlayground extends LitElement {
   @state() private streamingText = '';  // Text accumulating during stream
   @state() private jsonSchemaInput = '';
   @state() private jsonSchemaError: string | null = null;
-  @state() private isConnected = false;
+  @state() private wsConnected = false;
   @state() private connectionStatus = 'Connecting...';
+  @state() private requestStartTime: number | null = null;
+  @state() private elapsedTime = 0;
+
+  private elapsedTimeInterval: number | null = null;
 
   private ws: WebSocket | null = null;
 
@@ -61,11 +65,12 @@ export class GeminiPlayground extends LitElement {
         const message = JSON.parse(event.data);
 
         if (message.type === 'session_open') {
-          this.isConnected = true;
+          this.wsConnected = true;
           this.connectionStatus = 'Connected';
         } else if (message.type === 'playground_chunk') {
           this.streamingText += message.text;
         } else if (message.type === 'playground_complete') {
+          this.stopElapsedTimer();
           this.response = {
             success: true,
             response: message.response,
@@ -73,6 +78,7 @@ export class GeminiPlayground extends LitElement {
           };
           this.isLoading = false;
         } else if (message.type === 'playground_error') {
+          this.stopElapsedTimer();
           this.response = {
             success: false,
             error: message.error,
@@ -87,12 +93,12 @@ export class GeminiPlayground extends LitElement {
     this.ws.onerror = (error) => {
       console.error('WebSocket error:', error);
       this.connectionStatus = 'Connection error';
-      this.isConnected = false;
+      this.wsConnected = false;
     };
 
     this.ws.onclose = () => {
       console.log('WebSocket closed, reconnecting...');
-      this.isConnected = false;
+      this.wsConnected = false;
       this.connectionStatus = 'Disconnected. Reconnecting...';
       setTimeout(() => this.connectWebSocket(), 2000);
     };
@@ -475,17 +481,34 @@ export class GeminiPlayground extends LitElement {
   }
 
   private sendRequest() {
-    if (!this.config.userPrompt.trim() || !this.ws || !this.isConnected) return;
+    if (!this.config.userPrompt.trim() || !this.ws || !this.wsConnected) return;
 
     this.isLoading = true;
     this.streamingText = '';
     this.response = null;
+    this.requestStartTime = Date.now();
+    this.elapsedTime = 0;
+
+    // Start elapsed time counter
+    this.stopElapsedTimer();
+    this.elapsedTimeInterval = window.setInterval(() => {
+      if (this.requestStartTime) {
+        this.elapsedTime = Math.floor((Date.now() - this.requestStartTime) / 1000);
+      }
+    }, 1000);
 
     // Send request via WebSocket
     this.ws.send(JSON.stringify({
       type: 'playground_request',
       ...this.config,
     }));
+  }
+
+  private stopElapsedTimer() {
+    if (this.elapsedTimeInterval) {
+      clearInterval(this.elapsedTimeInterval);
+      this.elapsedTimeInterval = null;
+    }
   }
 
   private async copyResponse() {
@@ -631,7 +654,7 @@ export class GeminiPlayground extends LitElement {
           ` : ''}
 
           <!-- Connection Status -->
-          <div style="text-align: center; margin-bottom: 8px; font-size: 12px; color: ${this.isConnected ? 'rgba(76, 175, 80, 0.9)' : 'rgba(255, 255, 255, 0.5)'};">
+          <div style="text-align: center; margin-bottom: 8px; font-size: 12px; color: ${this.wsConnected ? 'rgba(76, 175, 80, 0.9)' : 'rgba(255, 255, 255, 0.5)'};">
             ${this.connectionStatus}
           </div>
 
@@ -639,9 +662,9 @@ export class GeminiPlayground extends LitElement {
           <button
             class="submit-btn"
             @click="${this.sendRequest}"
-            ?disabled="${this.isLoading || !this.config.userPrompt.trim() || !this.isConnected}"
+            ?disabled="${this.isLoading || !this.config.userPrompt.trim() || !this.wsConnected}"
           >
-            ${this.isLoading ? 'Generating...' : 'Send Request'}
+            ${this.isLoading ? `Generating... (${this.elapsedTime}s)` : 'Send Request'}
           </button>
         </div>
 
