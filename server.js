@@ -414,7 +414,6 @@ wss.on('connection', async (clientWs, req) => {
             }
 
             const startTime = Date.now();
-            const PLAYGROUND_TIMEOUT_MS = 60000; // 60 seconds timeout
 
             try {
               // Build contents array for generateContentStream
@@ -424,19 +423,12 @@ wss.on('connection', async (clientWs, req) => {
                 parts: [{ text: userPrompt }]
               }];
 
-              // Use generateContentStream with timeout for streaming responses
-              const streamPromise = client.models.generateContentStream({
+              // Use generateContentStream for streaming responses
+              const stream = await client.models.generateContentStream({
                 model: model,
                 contents: contents,
                 config: config,
               });
-
-              // Add timeout to prevent infinite waits
-              const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => reject(new Error('Request timeout after 60s - try reducing maxOutputTokens or using a faster model')), PLAYGROUND_TIMEOUT_MS);
-              });
-
-              const stream = await Promise.race([streamPromise, timeoutPromise]);
 
               let fullText = '';
               let usageMetadata = null;
