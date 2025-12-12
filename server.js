@@ -350,9 +350,13 @@ app.get('/health', (req, res) => {
 // Store active sessions
 const sessions = new Map();
 
-// WebSocket proxy for Live API
+// WebSocket proxy for Live API (voice) and Standard Streaming API (text)
 wss.on('connection', async (clientWs, req) => {
-  console.log('Client connected to proxy');
+  // Parse mode from query string (default to 'voice' for backward compatibility)
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const mode = url.searchParams.get('mode') || 'voice';
+
+  console.log(`Client connected to proxy (mode: ${mode})`);
   const sessionId = Date.now().toString();
 
   try {
@@ -363,18 +367,104 @@ wss.on('connection', async (clientWs, req) => {
       location: LOCATION,
     });
 
-    // Create Live session with inputAudioTranscription
-    // Use Vertex AI Live API model with native audio support
-    const model = 'gemini-live-2.5-flash-preview-native-audio-09-2025';
+    // ============================================
+    // TEXT MODE: Use Standard Streaming API
+    // ============================================
+    if (mode === 'text') {
+      console.log('Setting up text mode with standard streaming API (gemini-2.5-flash)');
 
-    console.log('Connecting to Vertex AI Live API with model:', model);
+      // Create chat session with automatic history management
+      const chatSession = client.chats.create({
+        model: 'gemini-2.5-flash',
+        config: {
+          systemInstruction: getAssistantInstructions(defaultPatientInfo)
+        }
+      });
+
+      // Store chat session for this connection
+      sessions.set(sessionId, { type: 'text', chatSession });
+      console.log('Text chat session created:', sessionId);
+
+      // Notify client that session is ready
+      clientWs.send(JSON.stringify({ type: 'session_open', mode: 'text' }));
+
+      // Handle incoming text messages
+      clientWs.on('message', async (data) => {
+        try {
+          const message = JSON.parse(data.toString());
+
+          if (message.type === 'text' && message.text) {
+            console.log('Received text message:', message.text.substring(0, 50) + '...');
+
+            // Stream response back to client
+            try {
+              const stream = await chatSession.sendMessageStream({
+                message: message.text,
+              });
+
+              for await (const chunk of stream) {
+                if (chunk.text) {
+                  clientWs.send(JSON.stringify({
+                    type: 'text_chunk',
+                    text: chunk.text
+                  }));
+                }
+              }
+
+              // Signal completion
+              clientWs.send(JSON.stringify({ type: 'text_complete' }));
+            } catch (streamError) {
+              console.error('Error streaming response:', streamError);
+              clientWs.send(JSON.stringify({ type: 'error', message: streamError.message }));
+            }
+          }
+        } catch (error) {
+          console.error('Error processing text message:', error);
+        }
+      });
+
+      clientWs.on('close', () => {
+        console.log('Text client disconnected, cleaning up session:', sessionId);
+        sessions.delete(sessionId);
+      });
+
+      return; // Exit early for text mode
+    }
+
+    // ============================================
+    // VOICE MODE: Use Live API (existing code)
+    // ============================================
+    const model = 'gemini-live-2.5-flash-preview-native-audio-09-2025';
+    console.log(`Connecting to Vertex AI Live API with model: ${model}`);
+
+    const sessionConfig = {
+      systemInstruction: {
+        parts: [{ text: getAssistantInstructions(defaultPatientInfo) }]
+      },
+      responseModalities: [Modality.AUDIO],
+      inputAudioTranscription: {},
+      outputAudioTranscription: {},
+      speechConfig: {
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
+      },
+      // VAD settings for better detection of short utterances like "yes", "no"
+      realtimeInputConfig: {
+        automaticActivityDetection: {
+          disabled: false,
+          startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_HIGH,
+          endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
+          prefixPaddingMs: 300,
+          silenceDurationMs: 500,
+        }
+      },
+    };
 
     const session = await client.live.connect({
       model: model,
       callbacks: {
         onopen: () => {
-          console.log('Vertex AI session opened');
-          clientWs.send(JSON.stringify({ type: 'session_open' }));
+          console.log('Vertex AI Live session opened');
+          clientWs.send(JSON.stringify({ type: 'session_open', mode: 'voice' }));
         },
         onmessage: (message) => {
           // Forward all messages to client
@@ -389,34 +479,13 @@ wss.on('connection', async (clientWs, req) => {
           clientWs.send(JSON.stringify({ type: 'session_close', reason: event?.reason || 'unknown' }));
         },
       },
-      config: {
-        responseModalities: [Modality.AUDIO],
-        inputAudioTranscription: {},
-        outputAudioTranscription: {},
-        speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
-        },
-        systemInstruction: {
-          parts: [{ text: getAssistantInstructions(defaultPatientInfo) }]
-        },
-        // VAD settings for better detection of short utterances like "yes", "no"
-        // Increased prefixPaddingMs to capture beginning of speech for transcription
-        realtimeInputConfig: {
-          automaticActivityDetection: {
-            disabled: false,
-            startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_HIGH,
-            endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
-            prefixPaddingMs: 300,    // Increased to 300ms to capture first words for transcription
-            silenceDurationMs: 500,  // Wait 500ms of silence before ending
-          }
-        },
-      },
+      config: sessionConfig,
     });
 
-    sessions.set(sessionId, session);
-    console.log('Session created:', sessionId);
+    sessions.set(sessionId, { type: 'voice', session });
+    console.log('Voice session created:', sessionId);
 
-    // Handle messages from client
+    // Handle messages from client (voice mode)
     clientWs.on('message', async (data) => {
       try {
         const message = JSON.parse(data.toString());
@@ -430,7 +499,7 @@ wss.on('connection', async (clientWs, req) => {
             },
           });
         } else if (message.type === 'text') {
-          // Send text to Gemini
+          // Send text to Gemini (for voice mode text input)
           session.sendClientContent({
             turns: [{ role: 'user', parts: [{ text: message.text }] }],
           });
@@ -441,10 +510,10 @@ wss.on('connection', async (clientWs, req) => {
     });
 
     clientWs.on('close', () => {
-      console.log('Client disconnected, closing session:', sessionId);
-      const session = sessions.get(sessionId);
-      if (session) {
-        session.close();
+      console.log('Voice client disconnected, closing session:', sessionId);
+      const sessionData = sessions.get(sessionId);
+      if (sessionData && sessionData.session) {
+        sessionData.session.close();
         sessions.delete(sessionId);
       }
     });

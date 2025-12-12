@@ -35,6 +35,10 @@ export class GdmLiveAudioVisuals3D extends LitElement {
   private prevTime = 0;
   private rotation = new THREE.Vector3(0, 0, 0);
 
+  // When frozen is true, the visualization shows as static background
+  @property({type: Boolean})
+  frozen = false;
+
   private _outputNode!: AudioNode;
 
   @property()
@@ -189,8 +193,11 @@ export class GdmLiveAudioVisuals3D extends LitElement {
   private animation() {
     requestAnimationFrame(() => this.animation());
 
-    this.inputAnalyser.update();
-    this.outputAnalyser.update();
+    // Only update analyzers when not frozen
+    if (!this.frozen) {
+      this.inputAnalyser.update();
+      this.outputAnalyser.update();
+    }
 
     const t = performance.now();
     const dt = (t - this.prevTime) / (1000 / 60);
@@ -198,19 +205,45 @@ export class GdmLiveAudioVisuals3D extends LitElement {
     const backdropMaterial = this.backdrop.material as THREE.RawShaderMaterial;
     const sphereMaterial = this.sphere.material as THREE.MeshStandardMaterial;
 
+    // Always update backdrop for subtle movement
     backdropMaterial.uniforms.rand.value = Math.random() * 10000;
 
     if (sphereMaterial.userData.shader) {
-      this.sphere.scale.setScalar(
-        1 + (0.2 * this.outputAnalyser.data[1]) / 255,
-      );
+      // When frozen, show static sphere; otherwise animate based on audio
+      if (this.frozen) {
+        // Static state: keep sphere at default scale, slow rotation only
+        this.sphere.scale.setScalar(1);
+        const slowF = 0.0001;
+        this.rotation.y += dt * slowF;
+      } else {
+        // Active state: animate based on audio
+        this.sphere.scale.setScalar(
+          1 + (0.2 * this.outputAnalyser.data[1]) / 255,
+        );
 
-      const f = 0.001;
-      this.rotation.x += (dt * f * 0.5 * this.outputAnalyser.data[1]) / 255;
-      this.rotation.z += (dt * f * 0.5 * this.inputAnalyser.data[1]) / 255;
-      this.rotation.y += (dt * f * 0.25 * this.inputAnalyser.data[2]) / 255;
-      this.rotation.y += (dt * f * 0.25 * this.outputAnalyser.data[2]) / 255;
+        const f = 0.001;
+        this.rotation.x += (dt * f * 0.5 * this.outputAnalyser.data[1]) / 255;
+        this.rotation.z += (dt * f * 0.5 * this.inputAnalyser.data[1]) / 255;
+        this.rotation.y += (dt * f * 0.25 * this.inputAnalyser.data[2]) / 255;
+        this.rotation.y += (dt * f * 0.25 * this.outputAnalyser.data[2]) / 255;
 
+        sphereMaterial.userData.shader.uniforms.time.value +=
+          (dt * 0.1 * this.outputAnalyser.data[0]) / 255;
+        sphereMaterial.userData.shader.uniforms.inputData.value.set(
+          (1 * this.inputAnalyser.data[0]) / 255,
+          (0.1 * this.inputAnalyser.data[1]) / 255,
+          (10 * this.inputAnalyser.data[2]) / 255,
+          0,
+        );
+        sphereMaterial.userData.shader.uniforms.outputData.value.set(
+          (2 * this.outputAnalyser.data[0]) / 255,
+          (0.1 * this.outputAnalyser.data[1]) / 255,
+          (10 * this.outputAnalyser.data[2]) / 255,
+          0,
+        );
+      }
+
+      // Camera rotation (always active for subtle movement)
       const euler = new THREE.Euler(
         this.rotation.x,
         this.rotation.y,
@@ -221,21 +254,6 @@ export class GdmLiveAudioVisuals3D extends LitElement {
       vector.applyQuaternion(quaternion);
       this.camera.position.copy(vector);
       this.camera.lookAt(this.sphere.position);
-
-      sphereMaterial.userData.shader.uniforms.time.value +=
-        (dt * 0.1 * this.outputAnalyser.data[0]) / 255;
-      sphereMaterial.userData.shader.uniforms.inputData.value.set(
-        (1 * this.inputAnalyser.data[0]) / 255,
-        (0.1 * this.inputAnalyser.data[1]) / 255,
-        (10 * this.inputAnalyser.data[2]) / 255,
-        0,
-      );
-      sphereMaterial.userData.shader.uniforms.outputData.value.set(
-        (2 * this.outputAnalyser.data[0]) / 255,
-        (0.1 * this.outputAnalyser.data[1]) / 255,
-        (10 * this.outputAnalyser.data[2]) / 255,
-        0,
-      );
     }
 
     this.composer.render();
