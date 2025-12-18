@@ -23,7 +23,8 @@ interface ConversationEntry {
 }
 
 // Type for interaction mode
-type InteractionMode = 'voice' | 'text' | 'playground';
+type InteractionMode = 'voice' | 'text' | 'playground' | 'stt';
+type STTEngine = 'gemini' | 'chirp3';
 
 @customElement('gdm-live-audio')
 export class GdmLiveAudio extends LitElement {
@@ -42,6 +43,11 @@ export class GdmLiveAudio extends LitElement {
   // Current in-progress transcriptions (while speaking)
   @state() currentUserInput = '';
   @state() currentAiOutput = '';
+
+  // STT mode specific state
+  @state() sttTranscript: string[] = [];  // Array of completed transcription segments
+  @state() sttEngine: STTEngine = 'gemini';  // Selected STT engine
+  @state() currentEngine = '';  // Engine being used for current session
 
   // Add patient info state
   @state() patientInfo: PatientInfo = {
@@ -290,6 +296,60 @@ export class GdmLiveAudio extends LitElement {
     .modal-buttons button:hover {
       opacity: 0.9;
     }
+
+    /* STT Mode Styles */
+    .engine-selector {
+      display: flex;
+      gap: 20px;
+      margin-bottom: 16px;
+      color: white;
+    }
+
+    .engine-selector label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      padding: 8px 16px;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      font-size: 14px;
+    }
+
+    .engine-selector label:has(input:checked) {
+      background: rgba(255, 255, 255, 0.25);
+      border-color: rgba(255, 255, 255, 0.5);
+    }
+
+    .engine-selector input[type="radio"] {
+      accent-color: #4CAF50;
+    }
+
+    .stt-controls {
+      display: flex;
+      gap: 10px;
+    }
+
+    .stt-controls button {
+      padding: 12px 20px;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      color: white;
+      cursor: pointer;
+      font-size: 14px;
+      transition: all 0.2s ease;
+    }
+
+    .stt-controls button:hover:not([disabled]) {
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    .stt-controls button[disabled] {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
   `;
 
   constructor() {
@@ -305,7 +365,11 @@ export class GdmLiveAudio extends LitElement {
 
   private connectToProxy() {
     this.updateStatus('Connecting to Vertex AI via proxy...');
-    const wsUrl = `${PROXY_WS_URL}?mode=${this.mode}`;
+    let wsUrl = `${PROXY_WS_URL}?mode=${this.mode}`;
+    // Add engine parameter for STT mode
+    if (this.mode === 'stt') {
+      wsUrl += `&engine=${this.sttEngine}`;
+    }
     console.log('Connecting to proxy:', wsUrl);
 
     this.ws = new WebSocket(wsUrl);
@@ -336,8 +400,18 @@ export class GdmLiveAudio extends LitElement {
 
         if (message.type === 'session_open') {
           this.isSessionConnected = true;
-          const modeLabel = message.mode === 'text' ? 'text' : 'voice';
-          this.updateStatus(`Connected in ${modeLabel} mode! ${modeLabel === 'voice' ? 'Click Start to begin.' : 'Type a message to start.'}`);
+          this.currentEngine = message.engine || '';
+          // Build mode label with engine info for STT
+          const engineLabel = message.engine === 'chirp3' ? 'Chirp 3' : 'Gemini Live';
+          const modeLabels: Record<string, string> = {
+            'voice': 'voice',
+            'text': 'text',
+            'stt': `STT (${engineLabel})`,
+            'playground': 'playground'
+          };
+          const label = modeLabels[message.mode] || message.mode;
+          const instruction = message.mode === 'text' ? 'Type a message to start.' : 'Click Start to begin.';
+          this.updateStatus(`Connected in ${label} mode! ${instruction}`);
         } else if (message.type === 'error') {
           this.updateError(message.message);
           this.isSessionConnected = false;
@@ -362,6 +436,26 @@ export class GdmLiveAudio extends LitElement {
           }
           this.requestUpdate();
           this.scrollToBottom();
+        } else if (message.type === 'transcription') {
+          // Handle STT mode transcription messages
+          if (message.text) {
+            this.currentUserInput += message.text;
+            this.requestUpdate();
+            this.scrollToBottom();
+          }
+          if (message.finished && this.currentUserInput.trim()) {
+            // Store completed segment with confidence if available
+            const entry = message.confidence
+              ? `${this.currentUserInput.trim()} [${(message.confidence * 100).toFixed(1)}%]`
+              : this.currentUserInput.trim();
+            this.sttTranscript = [...this.sttTranscript, entry];
+            this.conversationHistory = [...this.conversationHistory,
+              { role: 'user', text: this.currentUserInput.trim() }
+            ];
+            this.currentUserInput = '';
+            this.requestUpdate();
+            this.scrollToBottom();
+          }
         } else if (message.type === 'message' && message.data) {
           await this.handleGeminiMessage(message.data);
         }
@@ -604,8 +698,25 @@ export class GdmLiveAudio extends LitElement {
     this.conversationHistory = [];
     this.currentUserInput = '';
     this.currentAiOutput = '';
+    this.sttTranscript = [];  // Clear STT transcript on reset
     this.connectToProxy();
     this.updateStatus('Session cleared.');
+  }
+
+  // Download transcript for STT mode
+  private downloadTranscript() {
+    const header = `Transcript - ${this.currentEngine === 'chirp3' ? 'Google Chirp 3' : 'Gemini Live API'}\n`;
+    const date = `Date: ${new Date().toLocaleString()}\n`;
+    const separator = '='.repeat(50) + '\n\n';
+    const content = header + date + separator + this.sttTranscript.join('\n\n');
+
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `transcript-${this.sttEngine}-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   // Mode switching methods
@@ -698,13 +809,13 @@ export class GdmLiveAudio extends LitElement {
             `)}
             ${this.currentUserInput ? html`
               <div class="user-transcription" style="opacity: 0.7">
-                <strong>You (${this.mode === 'voice' ? 'speaking' : 'typing'}):</strong><br>
+                <strong>You (${this.mode === 'voice' || this.mode === 'stt' ? 'speaking' : 'typing'}):</strong><br>
                 ${this.currentUserInput}
               </div>
             ` : ''}
             ${this.currentAiOutput ? html`
               <div class="ai-transcription" style="opacity: 0.7">
-                <strong>AI Assistant (${this.mode === 'voice' ? 'speaking' : 'responding'}):</strong><br>
+                <strong>AI Assistant (${this.mode === 'voice' || this.mode === 'stt' ? 'speaking' : 'responding'}):</strong><br>
                 ${this.currentAiOutput}
               </div>
             ` : ''}
@@ -731,6 +842,12 @@ export class GdmLiveAudio extends LitElement {
               ?disabled=${this.isRecording}
               @click=${() => this.requestModeSwitch('playground')}>
               <span>Playground</span>
+            </button>
+            <button
+              class="${this.mode === 'stt' ? 'active' : ''}"
+              ?disabled=${this.isRecording}
+              @click=${() => this.requestModeSwitch('stt')}>
+              <span>STT</span>
             </button>
           </div>
 
@@ -777,6 +894,34 @@ export class GdmLiveAudio extends LitElement {
               </svg>
             </button>
           ` : ''}
+
+          <!-- STT Mode Controls -->
+          ${this.mode === 'stt' ? html`
+            <div class="engine-selector">
+              <label>
+                <input type="radio" name="engine" value="gemini"
+                  ?checked=${this.sttEngine === 'gemini'}
+                  ?disabled=${this.isRecording}
+                  @change=${() => { this.sttEngine = 'gemini'; this.reset(); }}>
+                Gemini Live (Dec 2025)
+              </label>
+              <label>
+                <input type="radio" name="engine" value="chirp3"
+                  ?checked=${this.sttEngine === 'chirp3'}
+                  ?disabled=${this.isRecording}
+                  @change=${() => { this.sttEngine = 'chirp3'; this.reset(); }}>
+                Chirp 3 (Cloud STT)
+              </label>
+            </div>
+            <div class="stt-controls">
+              <button @click=${this.reset} ?disabled=${this.isRecording}>Reset</button>
+              <button @click=${this.startRecording} ?disabled=${this.isRecording}>Start</button>
+              <button @click=${this.stopRecording} ?disabled=${!this.isRecording}>Stop</button>
+              <button @click=${this.downloadTranscript} ?disabled=${this.sttTranscript.length === 0}>
+                Download
+              </button>
+            </div>
+          ` : ''}
         </div>
 
         <!-- Text Mode Input -->
@@ -807,7 +952,7 @@ export class GdmLiveAudio extends LitElement {
         <gdm-live-audio-visuals-3d
           .inputNode=${this.inputNode}
           .outputNode=${this.outputNode}
-          ?frozen=${this.mode !== 'voice'}></gdm-live-audio-visuals-3d>
+          ?frozen=${this.mode !== 'voice' && this.mode !== 'stt'}></gdm-live-audio-visuals-3d>
       </div>
     `;
   }
