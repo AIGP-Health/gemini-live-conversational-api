@@ -602,7 +602,6 @@ wss.on('connection', async (clientWs, req) => {
               })
               .on('error', (err) => {
                 console.error('Chirp3 streaming error:', err);
-                // Helpful error for API not enabled
                 let errorMsg = err.message;
                 if (err.message.includes('PERMISSION_DENIED') || err.message.includes('not enabled')) {
                   errorMsg = 'Speech-to-Text API not enabled. Enable at: https://console.cloud.google.com/apis/library/speech.googleapis.com';
@@ -632,7 +631,6 @@ wss.on('connection', async (clientWs, req) => {
             try {
               const message = JSON.parse(data.toString());
               if (message.type === 'audio' && recognizeStream) {
-                // Decode base64 to buffer and send to Chirp3
                 const audioBuffer = Buffer.from(message.data, 'base64');
                 recognizeStream.write({ audio: audioBuffer });
               }
@@ -657,7 +655,8 @@ wss.on('connection', async (clientWs, req) => {
       }
 
       // ========== GEMINI LIVE API STT (Default) ==========
-      const sttModel = 'gemini-2.5-flash-native-audio-preview-12-2025';
+      // Use non-native-audio model that supports TEXT responseModalities
+      const sttModel = 'gemini-2.0-flash-live-preview-04-09';
       console.log(`Connecting to Gemini Live API for STT: ${sttModel}`);
 
       const sttSessionConfig = {
