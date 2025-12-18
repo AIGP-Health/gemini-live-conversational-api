@@ -24,7 +24,6 @@ interface ConversationEntry {
 
 // Type for interaction mode
 type InteractionMode = 'voice' | 'text' | 'playground' | 'stt';
-type STTEngine = 'gemini' | 'chirp3';
 
 @customElement('gdm-live-audio')
 export class GdmLiveAudio extends LitElement {
@@ -46,8 +45,6 @@ export class GdmLiveAudio extends LitElement {
 
   // STT mode specific state
   @state() sttTranscript: string[] = [];  // Array of completed transcription segments
-  @state() sttEngine: STTEngine = 'gemini';  // Selected STT engine
-  @state() currentEngine = '';  // Engine being used for current session
 
   // Add patient info state
   @state() patientInfo: PatientInfo = {
@@ -298,34 +295,6 @@ export class GdmLiveAudio extends LitElement {
     }
 
     /* STT Mode Styles */
-    .engine-selector {
-      display: flex;
-      gap: 20px;
-      margin-bottom: 16px;
-      color: white;
-    }
-
-    .engine-selector label {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      cursor: pointer;
-      padding: 8px 16px;
-      border: 1px solid rgba(255, 255, 255, 0.3);
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.1);
-      font-size: 14px;
-    }
-
-    .engine-selector label:has(input:checked) {
-      background: rgba(255, 255, 255, 0.25);
-      border-color: rgba(255, 255, 255, 0.5);
-    }
-
-    .engine-selector input[type="radio"] {
-      accent-color: #4CAF50;
-    }
-
     .stt-controls {
       display: flex;
       gap: 10px;
@@ -365,11 +334,7 @@ export class GdmLiveAudio extends LitElement {
 
   private connectToProxy() {
     this.updateStatus('Connecting to Vertex AI via proxy...');
-    let wsUrl = `${PROXY_WS_URL}?mode=${this.mode}`;
-    // Add engine parameter for STT mode
-    if (this.mode === 'stt') {
-      wsUrl += `&engine=${this.sttEngine}`;
-    }
+    const wsUrl = `${PROXY_WS_URL}?mode=${this.mode}`;
     console.log('Connecting to proxy:', wsUrl);
 
     this.ws = new WebSocket(wsUrl);
@@ -400,13 +365,10 @@ export class GdmLiveAudio extends LitElement {
 
         if (message.type === 'session_open') {
           this.isSessionConnected = true;
-          this.currentEngine = message.engine || '';
-          // Build mode label with engine info for STT
-          const engineLabel = message.engine === 'chirp3' ? 'Chirp 3' : 'Gemini Live';
           const modeLabels: Record<string, string> = {
             'voice': 'voice',
             'text': 'text',
-            'stt': `STT (${engineLabel})`,
+            'stt': 'STT (Gemini Live)',
             'playground': 'playground'
           };
           const label = modeLabels[message.mode] || message.mode;
@@ -705,7 +667,7 @@ export class GdmLiveAudio extends LitElement {
 
   // Download transcript for STT mode
   private downloadTranscript() {
-    const header = `Transcript - ${this.currentEngine === 'chirp3' ? 'Google Chirp 3' : 'Gemini Live API'}\n`;
+    const header = `Transcript - Gemini Live API\n`;
     const date = `Date: ${new Date().toLocaleString()}\n`;
     const separator = '='.repeat(50) + '\n\n';
     const content = header + date + separator + this.sttTranscript.join('\n\n');
@@ -714,7 +676,7 @@ export class GdmLiveAudio extends LitElement {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `transcript-${this.sttEngine}-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.txt`;
+    a.download = `transcript-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -897,22 +859,6 @@ export class GdmLiveAudio extends LitElement {
 
           <!-- STT Mode Controls -->
           ${this.mode === 'stt' ? html`
-            <div class="engine-selector">
-              <label>
-                <input type="radio" name="engine" value="gemini"
-                  ?checked=${this.sttEngine === 'gemini'}
-                  ?disabled=${this.isRecording}
-                  @change=${() => { this.sttEngine = 'gemini'; this.reset(); }}>
-                Gemini Live (Dec 2025)
-              </label>
-              <label>
-                <input type="radio" name="engine" value="chirp3"
-                  ?checked=${this.sttEngine === 'chirp3'}
-                  ?disabled=${this.isRecording}
-                  @change=${() => { this.sttEngine = 'chirp3'; this.reset(); }}>
-                Chirp 3 (Cloud STT)
-              </label>
-            </div>
             <div class="stt-controls">
               <button @click=${this.reset} ?disabled=${this.isRecording}>Reset</button>
               <button @click=${this.startRecording} ?disabled=${this.isRecording}>Start</button>

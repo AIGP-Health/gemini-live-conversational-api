@@ -554,107 +554,10 @@ wss.on('connection', async (clientWs, req) => {
     }
 
     // ============================================
-    // STT MODE: Transcription-only with engine selection
+    // STT MODE: Transcription-only using Gemini Live API
     // ============================================
     if (mode === 'stt') {
-      const engine = url.searchParams.get('engine') || 'gemini'; // 'gemini' or 'chirp3'
-      console.log(`Setting up STT mode with engine: ${engine}`);
-
-      if (engine === 'chirp3') {
-        // ========== CHIRP 3 (Cloud Speech-to-Text V2) ==========
-        // Dynamic import for backward compatibility - app works without this package
-        let speech;
-        try {
-          const speechModule = await import('@google-cloud/speech');
-          speech = speechModule.v2;
-        } catch (importErr) {
-          console.error('Chirp3 requires @google-cloud/speech package:', importErr.message);
-          clientWs.send(JSON.stringify({
-            type: 'error',
-            message: 'Chirp 3 not available. Install with: npm install @google-cloud/speech'
-          }));
-          clientWs.close();
-          return;
-        }
-
-        try {
-          const speechClient = new speech.SpeechClient();
-          const recognizer = `projects/${PROJECT_ID}/locations/${LOCATION}/recognizers/_`;
-
-          sessions.set(sessionId, { type: 'stt-chirp3' });
-          clientWs.send(JSON.stringify({ type: 'session_open', mode: 'stt', engine: 'chirp3' }));
-
-          let recognizeStream = null;
-
-          const startStream = () => {
-            recognizeStream = speechClient._streamingRecognize()
-              .on('data', (response) => {
-                if (response.results?.[0]?.alternatives?.[0]) {
-                  const result = response.results[0];
-                  clientWs.send(JSON.stringify({
-                    type: 'transcription',
-                    text: result.alternatives[0].transcript,
-                    finished: result.isFinal,
-                    confidence: result.alternatives[0].confidence,
-                    engine: 'chirp3'
-                  }));
-                }
-              })
-              .on('error', (err) => {
-                console.error('Chirp3 streaming error:', err);
-                let errorMsg = err.message;
-                if (err.message.includes('PERMISSION_DENIED') || err.message.includes('not enabled')) {
-                  errorMsg = 'Speech-to-Text API not enabled. Enable at: https://console.cloud.google.com/apis/library/speech.googleapis.com';
-                }
-                clientWs.send(JSON.stringify({ type: 'error', message: errorMsg }));
-              });
-
-            // Send config request first
-            recognizeStream.write({
-              recognizer,
-              streamingConfig: {
-                config: {
-                  model: 'chirp_3',
-                  languageCodes: ['en-US'],
-                  autoDecodingConfig: {},
-                },
-                streamingFeatures: {
-                  interimResults: true,
-                },
-              },
-            });
-          };
-
-          startStream();
-
-          clientWs.on('message', async (data) => {
-            try {
-              const message = JSON.parse(data.toString());
-              if (message.type === 'audio' && recognizeStream) {
-                const audioBuffer = Buffer.from(message.data, 'base64');
-                recognizeStream.write({ audio: audioBuffer });
-              }
-            } catch (error) {
-              console.error('Error processing Chirp3 message:', error);
-            }
-          });
-
-          clientWs.on('close', () => {
-            console.log('Chirp3 STT client disconnected:', sessionId);
-            if (recognizeStream) recognizeStream.end();
-            sessions.delete(sessionId);
-          });
-
-          return;
-        } catch (setupErr) {
-          console.error('Chirp3 setup error:', setupErr);
-          clientWs.send(JSON.stringify({ type: 'error', message: setupErr.message }));
-          clientWs.close();
-          return;
-        }
-      }
-
-      // ========== GEMINI LIVE API STT (Default) ==========
+      // ========== GEMINI LIVE API STT ==========
       // Use non-native-audio model that supports TEXT responseModalities
       const sttModel = 'gemini-2.0-flash-live-preview-04-09';
       console.log(`Connecting to Gemini Live API for STT: ${sttModel}`);
@@ -672,15 +575,14 @@ wss.on('connection', async (clientWs, req) => {
         callbacks: {
           onopen: () => {
             console.log('Gemini STT session opened');
-            clientWs.send(JSON.stringify({ type: 'session_open', mode: 'stt', engine: 'gemini' }));
+            clientWs.send(JSON.stringify({ type: 'session_open', mode: 'stt' }));
           },
           onmessage: (message) => {
             if (message.serverContent?.inputTranscription) {
               clientWs.send(JSON.stringify({
                 type: 'transcription',
                 text: message.serverContent.inputTranscription.text,
-                finished: message.serverContent.inputTranscription.finished || false,
-                engine: 'gemini'
+                finished: message.serverContent.inputTranscription.finished || false
               }));
             }
           },
